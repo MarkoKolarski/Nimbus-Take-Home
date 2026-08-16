@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nimbus
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  localstack:
+    image: localstack/localstack:3
+    environment:
+      SERVICES: s3
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  seed:
+    build: services/api
+    command: sh -c "alembic upgrade head && python -m app.seed"
+    environment: &api_env
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/nimbus
+      S3_ENDPOINT_URL: http://localstack:4566
+      S3_BUCKET_NAME: nimbus-dev
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      FIXTURES_DIR: /app/fixtures
+    volumes:
+      - ./fixtures:/app/fixtures:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+
+  api:
+    build: services/api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    environment: *api_env
+    ports:
+      - "8000:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: services/api
+    command: python -m app.worker
+    environment: *api_env
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:

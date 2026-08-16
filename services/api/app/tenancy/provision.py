@@ -19,12 +19,6 @@ def schema_name_for(email: str) -> str:
 
 def provision_tenant(conn: Connection, schema_name: str) -> None:
     """Create a tenant's data-plane schema and its full table set.
-
-    Schema name is always interpolated through psycopg.sql.Identifier, never
-    string-formatted, mirroring the identifier-safety rule BUILDPLAN.md §3
-    states for the (later) SET LOCAL search_path code. Runs as part of the
-    caller's transaction so schema creation, table DDL, and the caller's
-    public.tenants insert commit or roll back together.
     """
     schema = sql.Identifier(schema_name)
 
