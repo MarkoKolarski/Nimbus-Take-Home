@@ -17,6 +17,12 @@ class Settings(BaseSettings):
 
     openrouter_api_key: str = ""
 
+    # Dev default so `OPENROUTER_API_KEY` stays the only required key; override
+    # via env for anything beyond local/demo use.
+    jwt_secret_key: str = "nimbus-dev-secret-do-not-use-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_expire_minutes: int = 60 * 24
+
     @property
     def sqlalchemy_database_url(self) -> str:
 
