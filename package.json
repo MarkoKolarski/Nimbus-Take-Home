@@ -1,0 +1,7 @@
+{
+  "name": "nimbus-take-home",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ]
+}
