@@ -19,11 +19,23 @@ execution order and current status.
 - chunks and contents rows for a content_hash are deleted together, always.
 - Never commit .env. Never print the OpenRouter key.
 
+# Code style
+- No AI-slop comments. Comment only where a senior engineer would: a
+  non-obvious invariant, a workaround, a "why", never a restatement of
+  the code. Keep it short.
+- Function/docstring descriptions: short and precise, like a senior
+  engineer would write them — no filler, no restating the signature.
+
 # Workflow
 - Read SPEC.md and BUILDPLAN.md before starting any block.
-- A block is not done until `test` passes. Show the output as proof.
-- After each block: tick the checkbox in BUILDPLAN.md, update Trenutni status,
-  commit with a conventional message.
+- Split each tag into meaningful, independent chunks of work and go
+  through them in order, one at a time.
+- A chunk is not done until `test` passes. Show the output as proof.
+- After each chunk: tick the checkbox in BUILDPLAN.md, update Trenutni
+  status, then give a short plain-language summary of what was done.
+  Do not commit — leave that action to the user.
+- Commit message, when the user asks for one: a single short title
+  line, nothing else (no body).
 - At the end of a tag: create an annotated git tag whose message is the
   decision-log entry for that tag.
 - If SPEC.md is ambiguous, state the assumption in the code comment and in
