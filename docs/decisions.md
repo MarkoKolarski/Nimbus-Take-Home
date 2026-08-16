@@ -124,3 +124,57 @@ alice/bob vraćaju različit i tačan identitet bez mešanja, falsifikovan JWT
 HTTP stek (`curl` login/me za oba korisnika kroz `localhost:8000`) — cookie
 jars za alice i bob vraćaju tačno njihove identitete, bez cookie-ja `401`,
 pogrešna lozinka `401`.
+
+---
+
+## v1.0-core / Tenant sloj — 2026-08-16
+
+### Kontekst
+
+`provision_tenant()` i `public.tenants` su već postojali (v0.1-skeleton, ispred plana). Ono što je
+ovom bloku stvarno ostalo: session zavisnost koja radi `SET LOCAL search_path` iz proverenog
+tokena, i ORM model set koji se kroz nju razrešava — bez ijednog `schema=` argumenta. Do sada u
+repo-u nije postojao nijedan SQLAlchemy ORM model; sledećih pet blokova (Datasource+S3,
+Direktorijumi, Sync, Ingest, Chat) grade direktno na ovom sloju.
+
+### Odluke
+
+1. **`app/tenancy/registry.py`, ne `core/db.py`, drži tenant-session mehaniku.** `core/security.py`
+   već uvozi `get_db` iz `core/db.py`; kad bi zavisnost za tenant-scoped sesiju živela u `db.py` i
+   trebao joj `CurrentUser`/`get_current_user` kao `Depends()` parametar, nastao bi kružni uvoz.
+   `tenancy/registry.py` drži jednosmeran sloj: `core` (opšta DB/identitet infrastruktura) ←
+   `tenancy` (mapiranje identitet → šema) ← rute. Ovo je i tačno ime fajla koje BUILDPLAN.md već
+   predviđa u §8 (`tenancy/{provision,registry}.py`).
+2. **`tenant_session(user_id)` kontekst-menadžer ispod FastAPI zavisnosti**, ne direktno
+   generator vezan za `Depends`. §3 eksplicitno kaže da worker (blok "Sync state + worker") mora
+   da radi identičnu stvar sa golim `user_id` iz `sync_jobs` reda, bez ijednog HTTP zahteva na koji
+   bi okačio `Depends`. Deljenje mehanizma sad znači da worker kasnije samo pozove
+   `tenant_session()`, bez duplirane logike. Commit se dešava unutar `tenant_session` samog (ne u
+   svakoj ruti pojedinačno) — ovo će koristiti svaka buduća ruta koja piše, pa centralizovan
+   commit/rollback znači da nijedan budući blok ne može da ga zaboravi.
+3. **`SET LOCAL search_path` ide kroz `psycopg.sql.Identifier`, izvršeno na Session-ovoj
+   sopstvenoj konekciji** (`Session.connection().connection.dbapi_connection` za citiranje,
+   `Connection.exec_driver_sql()` za izvršavanje) — ostaje na istoj transakciji koju Session
+   koristi za sve naredne upite u tom zahtevu, uz jedini auditovan put za citiranje imena šeme,
+   isti kao u `provision.py`. `schema_name` se čita iz `public.tenants` (`.scalar_one()`), nikad iz
+   korisničkog unosa.
+4. **Svih 7 tenant modela deklarisano odmah, u jednom fajlu**, iako će ih većina rutа koristiti tek
+   u kasnijim blokovima — `domain/models.py` se prvi put pravi u ovom bloku, pa je jedan prolaz
+   protiv `provision_tenant()`-ove DDL jeftiniji nego pet parcijalnih provera kroz blokove. Ovo je i
+   doslovno značenje CLAUDE.md invarijante "jedan set modela opslužuje sve tenante". `chunks.embedding`
+   koristi `pgvector.sqlalchemy.Vector(384)` — dodat `pgvector` u `requirements.txt` (nije bio
+   zavisnost do sada), iako se kolona ne čita/piše do bloka "Ingest + dedup".
+5. **Alembic i dalje ne dira tenant šeme** (`migrations/env.py` ima `target_metadata = None`) —
+   `provision_tenant()`-ova ručno pisana DDL ostaje jedini izvor istine za oblik tenant tabela;
+   `domain/models.py` je drugi, ručno održavan opis istog oblika, korišćen samo za ORM upite u
+   runtime-u. Postojeća asimetrija iz §8 ("Alembic za `public`, versioned DDL za tenante") — ovaj
+   blok je ne menja, samo dodaje ORM stranu.
+
+### Verifikacija
+
+`docker compose up --build` (rebuild `api`/`worker` slike zbog novog `pgvector` paketa), pa
+`docker compose exec -T api pytest -q` → **14 passed** (11 postojećih + 3 nova u
+`test_isolation.py`: `SHOW search_path` sadrži tačnu šemu po korisniku, ORM upis kroz Alice-inu
+sesiju nije vidljiv kroz Bob-ovu i obrnuto — isti model, ista neti kvalifikovana tabela, fizički
+druga tabela — i SPEC.md §3-ov v1.0 meta-test: bez postavljenog `search_path`, nekvalifikovan upit
+na `datasources` puca sa `UndefinedTable`).
