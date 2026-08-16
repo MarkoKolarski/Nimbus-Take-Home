@@ -356,3 +356,90 @@ ovom bloku ne diraju uopšte — §8 tu granicu povlači eksplicitno (vidi odluk
 `alice/contracts/` fixture-ima, drugi klik zaredom → `409` sa postojećim poslom u telu, Bob-ov
 POST/GET na Alice-in `directory_id` → `404` oba, POST na nepostojeći `directory_id` → `404`, GET
 pre ijednog sync-a → `404`, worker označava posao `failed` kad direktorijum ne postoji).
+
+---
+
+## v1.0-core / Ingest + dedup — 2026-08-16
+
+### Kontekst
+
+`sync_jobs`/`SKIP LOCKED` petlja i polling endpoint su već postojali (Sync state + worker blok),
+ali worker je do sada samo brojao objekte — `documents`/`contents`/`chunks` nijednom nisu bili
+dotaknuti. Ovom bloku je ostalo jezgro celog sistema: `run_sync` mora stvarno da skine bajtove,
+ekstrahuje tekst, iseče ga na chunk-ove, embeduje ih i upiše, poštujući sva tri sloja dedupa iz
+§4 SPEC.md i živ predikat iz CLAUDE.md invarijante. Bez ovog bloka Chat + RAG (dva bloka dalje)
+nema nad čim da radi.
+
+### Odluke
+
+1. **Tri sloja dedupa kao tri uzastopne, kratko-spajajuće provere u `ingest_object()`**, ne tri
+   odvojena prolaza kroz listing. Sloj 1 (postojeći `documents` red za `(directory_id,
+   source_key)` čiji se `remote_etag`/`remote_size` poklapaju) prekida funkciju pre bilo kakvog
+   mrežnog poziva. Ako taj red postoji ali nije živ, funkcija ga svejedno ne dira — to je
+   dovoljno da "uklanjanje preživi re-sync" (§4) već sada radi ispravno, iako `removed_at` još
+   niko ne postavlja (taj deo dolazi tek u bloku "Uklanjanje"). Sloj 2 (`contents[content_hash]`
+   već postoji) preskače ekstrakciju/chunking/embedding, samo upiše `documents` red. Redosled je
+   bitan: sloj 1 mora biti prvi jer je jedini koji izbegava mrežni poziv uopšte.
+2. **Živ predikat centralizovan u `app/domain/refcount.py`** (`is_live_clause()` +
+   `release_content_if_orphaned()`), ne inline uslov u `ingest/index.py`. Ovaj blok je prvo mesto
+   gde se predikat koristi (sloj-3 dedup provera i refcount pri promeni sadržaja na istoj
+   putanji) — "Uklanjanje" blok i v1.2-ov `known_keys` diff ga ponovo uvoze umesto da naprave
+   drugu kopiju, tačno kako CLAUDE.md traži.
+3. **Izmenjen fajl na istoj putanji odmah pušta stari `content_hash` kroz refcount, u ovom
+   bloku, ne odloženo za "Uklanjanje".** SPEC.md §4 ("ista putanja + drugi bajtovi → nov sadržaj,
+   stari chunk-ovi se povlače") je deo definicije dedupa, ne uklanjanja — ostavljanje starih
+   `chunks`/`contents` redova siročadi ovde bi bio tih gubitak podataka istog tipa koji CLAUDE.md
+   izričito zabranjuje.
+4. **`run_sync` napušta `tenant_session()` helper i ručno upravlja sesijom** (isti stil kao
+   `claim_next_queued_job`), jer SPEC §5 traži commit po dokumentu (worker umre na pola → restart
+   nastavlja, ne kreće ispočetka), a `tenant_session()` commit-uje samo jednom na kraju. Pošto je
+   `SET LOCAL search_path` transakcijski, mora se ponovo pozvati posle svakog `db.commit()` u
+   petlji — inače sledeći nekvalifikovani upit ne vidi tenant tabele.
+5. **Chunking: `RecursiveCharacterTextSplitter`, `chunk_size=1500`, `chunk_overlap=200`
+   karaktera** — SPEC ne propisuje brojeve. 1500 karaktera je ~375 tokena po `len(text)//4`
+   proceni (ista formula koju BUILDPLAN već najavljuje za v1.6 kompakciju), bezbedno ispod
+   512-token limita `bge-small-en-v1.5` modela. `chunks.token_count` popunjen istom formulom.
+   Pretpostavka je zapisana i u BUILDPLAN.md.
+6. **"Streaming sha256" pročitano kao hashlib streaming API, ne novi S3-streaming protokol.**
+   `app/ingest/hash.py` hešira kroz `.update()` u 1MB blokovima, ali `Connector.get_object_bytes`
+   i dalje vraća pune bajtove — fixtures su mali fajlovi, pravo mrežno streaming skidanje bi
+   tražilo izmenu `Connector` Protocol-a preko `S3Connector`-a, van budžeta ovog bloka.
+7. **Embedder iza sopstvenog `Protocol`-a** (`app/ingest/embed.py`), model učitan lenjo i
+   keš-ovan na nivou procesa — isti obrazac kao `Connector`. `Dockerfile` dobija build-time korak
+   koji unapred skida `bge-small-en-v1.5` ONNX model, jer `api`/`worker` nemaju bind mount niti
+   mrežni pristup posle build-a.
+8. **Ekstrakcija po ekstenziji fajla, ne po sadržaju** (`.pdf` → pypdf, `.txt`/`.md` → UTF-8
+   decode), nepoznata ekstenzija diže grešku bez per-file catch-a — per-file greška → `partial`
+   stanje je eksplicitno v1.2 opseg (Sync state + worker bloka napomena), ne ovog bloka.
+
+### Greške pronađene i ispravljene tokom izrade
+
+- **`fastembed<0.5` ne podržava Python 3.13.** `pip install` u image-u je pukao na "no matching
+  distribution" — SPEC/BUILDPLAN nisu fiksirali verziju, pretpostavljena `>=0.4,<0.5` je zastarela
+  za bazni image (`python:3.13-slim`). Ispravka: `fastembed>=0.8,<0.9`, zapisano u BUILDPLAN.md.
+- **SQLAlchemy ne uređuje INSERT redosled preko `Content`/`Chunk` samo na osnovu kolonskog
+  `ForeignKey()`-a.** Bez `relationship()` između modela, unit-of-work ne zna da `chunks` mora
+  posle `contents` — prvi pravi sync je pukao na `chunks_content_hash_fkey` jer je `chunks` insert
+  otišao pre `contents` insert-a u istom flush-u. Ista klasa greške kao FK-redosled bug iz
+  Direktorijumi bloka, samo u suprotnom smeru (tamo DELETE, ovde INSERT). Ispravka: eksplicitan
+  `db.flush()` odmah posle `db.add(Content(...))`, pre nego što se ijedan `Chunk` doda.
+- **Postojeći `test_sync_state.py`-jev cleanup je pukao na FK čim je worker počeo stvarno da piše
+  u `documents`.** Ranije (Sync state + worker blok) worker nikad nije dirao `documents`, pa
+  `_cleanup` nije morao da ga briše pre `directories`; sad kad ingest stvarno upisuje redove,
+  `documents.directory_id` (bez `ON DELETE CASCADE`, v0.1-skeleton odluka #6) odbija brisanje
+  direktorijuma dok referenca postoji. Ispravka: `_cleanup` prvo briše `Document` redove za
+  direktorijum, tek onda sam direktorijum — ista popravka i u novom `test_dedup.py`-jevom
+  cleanup-u. `contents`/`chunks` namerno ostaju netaknuti posle cleanup-a — sadržajno adresirani,
+  bezbedno deljeni između testova, ne test-scoped scratch.
+
+### Verifikacija
+
+`docker compose up --build api worker` (novi `pypdf`/`langchain-text-splitters`/`fastembed`
+paketi i fastembed model bake-ovan u image), pa `docker compose exec -T api pytest -q` →
+**33 passed** (30 postojećih + 3 nova u `test_dedup.py`: svež sync `alice/contracts/` stvarno
+ekstrahuje PDF (`mime=application/pdf`, `text_len>0`), drugi sync iste nepromenjene direktorijuma
+vraća tačno `{scanned:3, unchanged:3, downloaded:0, indexed:0, deduped:0}`, `alice/duplicates/`
+(bajt-identičan `msa_copy.md`) posle sync-a `alice/contracts/` vraća `deduped:1, indexed:0` i deli
+isti `content_hash` sa `msa.md` bez duplog upisa u `chunks`). Ručno potvrđeno i preko `psql`-a:
+`contents` posle oba sync-a ima tačno 3 distinct `content_hash` (ne 4), `policy.pdf` ima
+`mime=application/pdf, text_len=41, chunk_count=1`.

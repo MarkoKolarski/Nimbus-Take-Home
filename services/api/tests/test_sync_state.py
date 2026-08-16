@@ -55,10 +55,11 @@ def _poll_until_terminal(client: TestClient, directory_id: str, timeout: float =
 
 def _cleanup(db_conn, email: str, datasource_id: str, directory_id: str | None) -> None:
     """directories/datasources have no ON DELETE CASCADE and sync_jobs has no
-    FK into a tenant schema at all — every layer is cleared by hand."""
-    from sqlalchemy import select
+    FK into a tenant schema at all, every layer is cleared by hand.
+    documents FK-references directories with no cascade either, so they go first."""
+    from sqlalchemy import delete, select
 
-    from app.domain.models import Datasource, Directory
+    from app.domain.models import Datasource, Directory, Document
     from app.tenancy.registry import tenant_session
 
     if directory_id is not None:
@@ -70,6 +71,7 @@ def _cleanup(db_conn, email: str, datasource_id: str, directory_id: str | None) 
         for directory in db.execute(
             select(Directory).where(Directory.datasource_id == uuid.UUID(datasource_id))
         ).scalars():
+            db.execute(delete(Document).where(Document.directory_id == directory.id))
             db.delete(directory)
         db.flush()
         row = db.get(Datasource, uuid.UUID(datasource_id))
