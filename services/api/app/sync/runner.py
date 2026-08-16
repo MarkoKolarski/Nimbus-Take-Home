@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from sqlalchemy import text
+from sqlalchemy import exists, select, text
 
 from app.connectors.s3 import S3Connector
 from app.core.db import SessionLocal
@@ -85,6 +85,14 @@ def run_sync(job_id: uuid.UUID, user_id: uuid.UUID, directory_id: uuid.UUID) -> 
         stats = {"scanned": len(objects), "unchanged": 0, "downloaded": 0, "indexed": 0, "deduped": 0}
 
         for obj in objects:
+            # Concurrent DELETE /directories/{id} can land mid-loop; recheck
+            # every iteration so we don't resurrect content for a
+            # directory that's gone. Once gone it stays gone, so break
+            # rather than skip-and-continue.
+            still_exists = db.execute(select(exists().where(Directory.id == directory_id))).scalar_one()
+            if not still_exists:
+                break
+
             outcome = ingest_object(db, connector, directory, datasource, obj, embedder)
             stats[outcome] += 1
             if outcome != "unchanged":

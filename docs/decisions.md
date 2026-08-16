@@ -443,3 +443,74 @@ vraća tačno `{scanned:3, unchanged:3, downloaded:0, indexed:0, deduped:0}`, `a
 isti `content_hash` sa `msa.md` bez duplog upisa u `chunks`). Ručno potvrđeno i preko `psql`-a:
 `contents` posle oba sync-a ima tačno 3 distinct `content_hash` (ne 4), `policy.pdf` ima
 `mime=application/pdf, text_len=41, chunk_count=1`.
+
+---
+
+## v1.0-core / Uklanjanje — 2026-08-16
+
+### Kontekst
+
+`documents` redovi sada postoje i popunjavaju se (Ingest + dedup blok), što znači da kaskadne
+operacije — brisanje dokumenta, brisanje celog direktorijuma — postaju životnopravni. Ovom bloku je
+ostalo: `DELETE /documents/{id}` sa refcount oslobađanjem, `DELETE /directories/{id}` kao kaskada
+(soft-delete svih dokumenata → refcount → hard-delete direktorijuma), i race-guard u worker-u
+protiv sinhronizacije koja je u toku kad se direktorijum obriše mid-sync.
+
+### Odluke
+
+1. **`DELETE /documents/{id}` radi na `is_live_clause()` iz `refcount.py`, bez Python re-provere
+   posle učitavanja.** Isti helper koji je "Ingest + dedup" već uvozio za sloj-3 dedup proveru —
+   dokument koji je nepostojeći, cross-tenant (nevidljiv kroz `search_path`) ili već uklonjen svi
+   daju isti 404, bez ponavljanja predikata u drugoj kodu. Soft delete (`removed_at = now()`), pa
+   `release_content_if_orphaned()` ako je imao `content_hash`. 204 No Content na uspeh.
+
+2. **`DELETE /directories/{id}` hard-briše sve `documents` redove za taj direktorijum, ne samo
+   markiranja `removed_at`.** `documents.directory_id` je NOT NULL bez `ON DELETE CASCADE` — "nijedan
+   documents red više ne pokazuje na taj direktorijum" (§4) doslovno znači da tih redova više nema.
+   Algoritam: (1) pročitaj `content_hash` skup iz trenutno živih `documents` redova (samo oni mogu
+   biti orfani ovde), (2) hard-briši sve `documents` redove za direktorijum, (3) pokreni refcount
+   oslobađanje samo za taj skup, (4) tek onda briši `directories` red. Nema dupliranja
+   predikata — isti `is_live_clause()` helper kao `DELETE /documents` i Ingest blok.
+
+3. **Race-guard: worker reCheck-uje `EXISTS(Directory)` na početku svake iteracije petlje.** Petlja
+   po fajlovima (`for obj in objects: ... ingest_object ... db.commit() ... set_search_path ...`)
+   sada proverava `directory_id` (sirov UUID argument, ne `directory` ORM objekat — onaj se ekspajruje
+   posle `db.commit()` sa `expire_on_commit=True`) pre svakog `ingest_object` poziva. `break` umesto
+   `continue` — kad direktorijum nestane, ostaće nestao za ostatak run-a, nema smisla dalje
+   downloadovati/ekstrahuvati/embedovati. Proverava se u istoj (pre-commit) transakciji kao file
+   upisi i post-commit `set_search_path` re-setup, pa je logika korektna kroz sve `db.commit()`
+   granice.
+
+4. **"Uklanjanje preživljava re-sync" je već ispravno bez izmene `ingest/index.py`.** Sloj-1 check
+   (existing `(directory_id, source_key)` sa poklapajućim `etag`/`size`) se vraća pre nego što
+   dotakne `removed_at`, što znači da je soft-obrisani dokument zaključan na mjestu — novi sync-i
+   ga ne vraćaju. Bilo je greške u zavisnosti, a ne koda. Dodan regresioni test
+   (`test_removed_document_does_not_reappear_on_unchanged_resync`) da se tvrdnja učini oborivom.
+
+5. **`GET` lista dokumenata po direktorijumu ostaje van ovog bloka.** BUILDPLAN (§7 tabela) je
+   eksplicitno stavlja u "React UI" blok — testovi čitaju `documents` redove direktno preko
+   `tenant_session`, isti obrazac kao `test_dedup.py`/`test_sync_state.py`, što dokazuje da API
+   nikada nije bio potreban za funckionalnost, samo za front-end.
+
+6. **Novi test fajl `test_removal.py`, isti presedan kao `test_dedup.py`** — šest testova:
+   refcount oslobađanja samo kad nema više živih referenci, nepostojeći dokument → 404,
+   cross-tenant pristup → 404 ne 403, uklonjen dokument ostaje uklonjen posle re-sync-a,
+   kaskadno brisanje direktorijuma sa refcount (sadržaj deli se između dva direktorijuma, briše se
+   tek posle što oba nestanu), i deterministički race-guard test (monkeypatch `ingest_object` da
+   commit-uje posle prvog fajla, pa pravi `DELETE /directories` poziv iz testnog HTTP klijenta,
+   potom `run_sync` u istom proces kao worker, proveravam da je samo 1 fajl obrađen od 3 skenirana).
+
+### Greške pronađene i ispravljene tokom izrade
+
+- **`job_id` može biti neiniitijalizovan u `test_directory_deleted_mid_sync_worker_skips_remaining_files`
+  cleanup-u** — test direktno ubacuje `sync_jobs` red kroz `db_conn`, trebam `job_id` inicijalizovan
+  na početku try bloka sa `= None` da se cleanup ne presiječe ako je INSERT pukao. Nema stvarne
+  greške u kodu, samo test-robusnost.
+
+### Verifikacija
+
+`docker compose up --build api worker` (bez novih spoljnih zavisnosti, čist refactoring), pa
+`docker compose exec -T api pytest -q` → **39 passed** (33 postojećih + 6 novih u `test_removal.py`:
+delete dokumena oslobađa sadržaj samo kad nema drugih živih referenci, nepostojeći/tuđ dokument
+vraća 404, uklonjeni dokument se ne pojavljuje u resync-u, kaskadno brisanje direktorijuma,
+race-guard worker ostaje između oba direktorijuma).

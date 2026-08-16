@@ -5,11 +5,12 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.domain.models import Datasource, Directory
+from app.domain.models import Datasource, Directory, Document
+from app.domain.refcount import is_live_clause, release_content_if_orphaned
 from app.tenancy.registry import get_tenant_db
 
 router = APIRouter(tags=["directories"])
@@ -77,4 +78,21 @@ def delete_directory(directory_id: uuid.UUID, db: Session = Depends(get_tenant_d
     directory = db.get(Directory, directory_id)
     if directory is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="directory not found")
+
+    content_hashes = db.execute(
+        select(Document.content_hash)
+        .where(Document.directory_id == directory_id, is_live_clause())
+        .distinct()
+    ).scalars().all()
+
+    # documents.directory_id is NOT NULL with no ON DELETE CASCADE, so the
+    # rows must actually be gone (not just removed_at) before the directory
+    # row itself can be hard-deleted below.
+    db.execute(delete(Document).where(Document.directory_id == directory_id))
+    db.flush()
+
+    for content_hash in content_hashes:
+        if content_hash is not None:
+            release_content_if_orphaned(db, content_hash)
+
     db.delete(directory)
