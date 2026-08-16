@@ -95,6 +95,30 @@ A `Makefile` wraps the first four as `make up` / `make test` / `make migrate` / 
    answer is no longer grounded in it. Sync once more: the removed file does **not**
    come back, even though it's still untouched at the source.
 
+## Example chat questions
+
+Once `alice/contracts/` (or `bob/contracts/`) is synced, these ask about facts that
+only exist in the fixture documents, so a grounded, non-echoed answer (with a
+citation) confirms the OpenRouter call actually worked end to end, not just that the
+retrieval pipeline ran:
+
+| User | Question | Answer should mention | Source |
+|---|---|---|---|
+| alice | `What is the quarterly license fee in the MSA?` | `$18,500` | `msa.md` |
+| alice | `How much notice is required to not renew the MSA?` | `90 days` | `msa.md` |
+| alice | `How long does the NDA's evaluation period last?` | `six (6) months` | `nda.txt` |
+| bob | `When does payroll run?` | `15th and last day of each month` | `onboarding.md` |
+| bob | `How many PTO days do full-time employees accrue per year?` | `15 days` | `handbook.txt` |
+
+Ask the same question as the other user (or before syncing) and the answer should say
+there's nothing about that in their documents, that's the tenant-isolation /
+no-context path, not a bug.
+
+Keep questions in English: `bge-small-en-v1.5` (the embedder) is an English-only
+model, a question phrased in another language can fall below the similarity
+threshold in `retrieve()` even when the answer is right there in the (English)
+document, and the LLM never sees a source to cite.
+
 ## Tests
 
 ```bash
