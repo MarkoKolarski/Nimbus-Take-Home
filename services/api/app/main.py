@@ -3,11 +3,13 @@ from sqlalchemy import text
 
 from app.api.routes.auth import router as auth_router
 from app.api.routes.datasources import router as datasources_router
+from app.api.routes.directories import router as directories_router
 from app.core.db import engine
 
 app = FastAPI(title="Nimbus API")
 app.include_router(auth_router)
 app.include_router(datasources_router)
+app.include_router(directories_router)
 
 
 @app.get("/health")
