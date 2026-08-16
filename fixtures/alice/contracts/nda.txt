@@ -1,0 +1,16 @@
+MUTUAL NON-DISCLOSURE AGREEMENT
+
+This Mutual Non-Disclosure Agreement ("Agreement") is entered into between
+Alice Nimbus Corp and Beacon Analytics Inc for the purpose of evaluating a
+potential data-sharing partnership around the ClearSight reporting
+dashboard.
+
+Each party agrees not to disclose the other's proprietary business
+information, source code, or customer data disclosed during the evaluation
+period, which runs for six (6) months from the date of signature.
+
+This Agreement does not obligate either party to enter into any further
+business relationship. Either party may terminate this Agreement with
+thirty (30) days' written notice.
+
+Governing law: State of Delaware.
