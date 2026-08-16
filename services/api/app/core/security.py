@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import bcrypt
 import jwt
+from cryptography.fernet import Fernet
 from fastapi import Cookie, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -15,9 +17,19 @@ from app.core.db import get_db
 
 ACCESS_TOKEN_COOKIE_NAME = "access_token"
 
+_fernet = Fernet(settings.fernet_key.encode())
+
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
     return bcrypt.checkpw(plain_password.encode(), password_hash.encode())
+
+
+def encrypt_json(data: dict) -> str:
+    return _fernet.encrypt(json.dumps(data).encode()).decode()
+
+
+def decrypt_json(blob: str) -> dict:
+    return json.loads(_fernet.decrypt(blob.encode()).decode())
 
 
 def create_access_token(user_id: uuid.UUID) -> str:

@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24
 
+    fernet_key: str = "tV_7aaFOJ9Eoi7RyMeTPlu8U1SSFumAYXMmadV8k_oA="
+
     @property
     def sqlalchemy_database_url(self) -> str:
 

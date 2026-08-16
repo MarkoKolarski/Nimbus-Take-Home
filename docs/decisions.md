@@ -178,3 +178,52 @@ Direktorijumi, Sync, Ingest, Chat) grade direktno na ovom sloju.
 sesiju nije vidljiv kroz Bob-ovu i obrnuto — isti model, ista neti kvalifikovana tabela, fizički
 druga tabela — i SPEC.md §3-ov v1.0 meta-test: bez postavljenog `search_path`, nekvalifikovan upit
 na `datasources` puca sa `UndefinedTable`).
+
+---
+
+## v1.0-core / Datasource + S3 — 2026-08-16
+
+### Kontekst
+
+Prvi blok koji stvarno koristi tenant-scoped ORM sloj (`get_tenant_db`, `Datasource` model) kroz
+pravu HTTP rutu, ne samo direktan test — potvrda da mehanizam iz prethodnog bloka radi pod pravim
+zahtevom. Registracija direktorijuma (pretvaranje pregledanog prefiksa u praćen `directories` red)
+je sledeći, poseban blok — ovaj staje na: poveži datasource, sačuvaj konfiguraciju bezbedno,
+omogući pregled prefiksa.
+
+### Odluke
+
+1. **Fernet ključ je fiksni dev-default u `config.py`, ne obavezna env promenljiva** — isti obrazac
+   kao `jwt_secret_key` (Auth blok). Mora biti fiksan, ne regenerisan pri svakom pokretanju:
+   Postgres podaci prežive `docker compose up` restart (samo `-v` briše), pa bi promenljiv ključ
+   nasukao svaki već enkriptovan `config_encrypted` red. Drži obećanje iz §12 da je
+   `OPENROUTER_API_KEY` jedini obavezan ključ.
+2. **`Connector` Protocol dobija sva tri metoda odmah** (`list_prefixes`, `list_objects`,
+   `get_object_bytes`), `S3Connector` implementira sva tri, ali ova ruta zove samo
+   `list_prefixes`. §7 (v1.4 pasus) već imenuje tačno ovu trojku kao oblik koji
+   `GoogleDriveConnector` mora da deli sa `S3Connector` — pisanje svih sada znači da Sync i Ingest
+   (kojima trebaju `list_objects`/`get_object_bytes`) ne diraju ugovor ovog Protocol-a kasnije.
+   Ista logika kao "svih 7 tenant modela odmah" iz prethodnog bloka.
+3. **Nema provere konekcije na `POST /datasources`.** Loš bucket/kredencijali pucaju glasno na
+   sledećem pozivu (`browse`), što je i sledeći korak u demo skripti (§9: poveži → pregledaj →
+   registruj). Provera na oba mesta bi bila dupliranje za 35-minutni blok.
+4. **`browse` ne hvata `botocore` greške u posebnu taksonomiju** — sirov `ClientError` kao 500 je
+   prihvatljivo za ovaj blok; lepše mapiranje provajder-grešaka nije ono što brief demonstrira.
+5. **Pydantic šeme (`S3ConnectionConfig`, `DatasourceCreate`, `DatasourceOut`) žive u
+   `datasources.py`, ne u `domain/schemas.py`** — isti obrazac kao `auth.py` (`LoginRequest`,
+   `UserOut` su takođe lokalne). Ništa drugo ih još ne koristi, pa bi deljeni schemas fajl razbio
+   tipove jedne rute na dva mesta bez ikakve koristi od deljenja.
+6. **`GET /datasources/{id}/browse` na tuđ ID vraća 404, ne 403** — besplatno iz tenant-šema
+   izolacije: strani ID prosto nije red u ovoj tenant tabeli, pa "ne postoji" i "postoji ali nije
+   tvoje" izgledaju identično. Ista osobina koju §3 traži za dokumente/sync.
+7. **Novi test fajl `test_datasources.py`, ne prošireni `test_isolation.py`** — isti presedan kao
+   `test_seed.py`/`test_auth.py`: jedan fajl po funkcionalnosti (uključujući njene sopstvene
+   izolacione provere), `test_isolation.py` ostaje niži DB/session-mehanizam sloj.
+
+### Verifikacija
+
+`docker compose up --build` (novi `cryptography` paket), pa `docker compose exec -T api pytest -q`
+→ **18 passed** (14 postojećih + 4 nova u `test_datasources.py`: kreiranje + listanje vraća
+`DatasourceOut` bez config polja, `browse` nad pravim LocalStack-om vraća stvarne prefikse
+(`alice/contracts/`, `alice/duplicates/`) što dokazuje ceo put enkripcija→upis→dekripcija→boto3
+poziv, Alice-in datasource se ne pojavljuje u Bob-ovoj listi, Bob-ov `browse` na Alice-in ID → 404).
