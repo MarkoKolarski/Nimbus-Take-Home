@@ -227,3 +227,63 @@ omogući pregled prefiksa.
 `DatasourceOut` bez config polja, `browse` nad pravim LocalStack-om vraća stvarne prefikse
 (`alice/contracts/`, `alice/duplicates/`) što dokazuje ceo put enkripcija→upis→dekripcija→boto3
 poziv, Alice-in datasource se ne pojavljuje u Bob-ovoj listi, Bob-ov `browse` na Alice-in ID → 404).
+
+---
+
+## v1.0-core / Direktorijumi — 2026-08-16
+
+### Kontekst
+
+`directories` tabela i `Directory` ORM model su već postojali (v0.1-skeleton, Tenant sloj blok) —
+ovom bloku je ostalo čisto API površina iznad postojeće šeme: registruj, listaj, obriši. Nijedan
+red u `documents` još ne može da pokazuje na direktorijum, jer Sync i Ingest još ne postoje — pa je
+brisanje direktorijuma u ovom bloku prost `DELETE`, bez ikakve kaskadne logike.
+
+### Odluke
+
+1. **Register/list ugnježdeni pod `/datasources/{id}/directories`, delete pljosnat
+   `/directories/{id}`.** Isti obrazac koji SPEC.md sam koristi kad referiše ovaj endpoint u §3/§4
+   (`DELETE /directories/{id}`), i simetrično sa postojećim `GET /datasources/{id}/browse` iz
+   prethodnog bloka — register/list logično traže roditelja (koji datasource), delete ne mora.
+2. **404 na nepostojeći/tuđ `datasource_id`, ista logika kao `browse`.** `_get_datasource_or_404`
+   radi identičnu proveru koju je prethodni blok već uveo za `browse_datasource` — tenant izolacija
+   je besplatna posledica `search_path`, "ne postoji" i "postoji ali nije tvoje" izgledaju identično
+   i za register i za list.
+3. **Duplo registrovan `(datasource_id, prefix)` → `409`, ne `500`.** Tabela već ima
+   `UNIQUE(datasource_id, prefix)` (Tenant sloj blok); ruta hvata `IntegrityError` i prevodi ga u
+   čitljiv HTTP status — isti obrazac kao SPEC-ov opis partial unique index-a za `sync_jobs` u §5
+   (baza je izvor istine za ograničenje, aplikacija ga samo čitljivo prevodi).
+4. **`_get_datasource_or_404` helper ostaje lokalan u `directories.py`, ne premešten u
+   `datasources.py`.** Koristi se dva puta unutar istog fajla (register + list); deljenje sa već
+   završenim `datasources.py` bi značilo diranje gotovog bloka radi tri linije koje se ne ponavljaju
+   van ovog fajla.
+5. **Nema cascade/refcount logike u `DELETE /directories/{id}` u ovom bloku, namerno.** Puna verzija
+   (soft-delete svih dokumenata direktorijuma → refcount na `chunks`/`contents` → tek onda hard-delete
+   `directories` reda, §4) je eksplicitno budžetirana kao deo kasnijeg **Uklanjanje** bloka, kad Sync
+   i Ingest već mogu da popune `documents`. Dodavanje te logike sada bi bila mrtva grana koda —
+   ništa još ne postoji da bi je pokrenulo.
+6. **Novi test fajl `test_directories.py`, isti presedan kao `test_datasources.py`** — jedan fajl po
+   funkcionalnosti, uključujući njene sopstvene izolacione provere (register/list/delete na tuđem
+   resursu → `404`, ne `403`).
+
+### Greške pronađene i ispravljene tokom izrade
+
+- **`api`/`worker` nemaju bind mount — kod se peče u image na build-u.** Prvi `pytest` posle pisanja
+  koda je tiho pokazao "18 passed" (stari broj, stari image), nova ruta i novi test fajl uopšte
+  nisu bili unutar kontejnera. Ispravka: svaka izmena koda tokom ovog bloka tražila je
+  `docker compose up --build api` pre `pytest`-a, ne samo `exec`. Vredna lekcija za sve naredne
+  blokove — "test prošao" bez rebuild-a ovde ne dokazuje ništa.
+- **Test cleanup pucao na FK, ne na `search_path`.** `_delete_datasource` je brisao `Datasource` red
+  bez da prvo obriše njegove `Directory` redove; `directories_datasource_id_fkey` (namerno bez
+  `ON DELETE CASCADE`, v0.1-skeleton odluka #6) je to ispravno odbio. Ispravka: `_delete_datasource`
+  prvo pronađe i obriše sve `Directory` redove za taj `datasource_id`, eksplicitan `db.flush()`, tek
+  onda briše `Datasource` — bez `flush()`-a SQLAlchemy nema garantovan redosled DELETE naredbi kad
+  ne postoji `relationship()` između modela, samo `ForeignKey` kolona.
+
+### Verifikacija
+
+`docker compose up --build api` pa `docker compose exec -T api pytest -q` → **24 passed** (18
+postojećih + 6 novih u `test_directories.py`: registracija + listanje, duplo registrovan prefiks →
+`409`, registracija pod nepostojećim `datasource_id` → `404`, brisanje uklanja iz liste, Bob-ov
+register/list na Alice-in `datasource_id` → `404` za oba, Bob-ovo brisanje Alice-inog
+`directory_id` → `404` i red ostaje netaknut).
