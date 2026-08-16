@@ -1,121 +1,86 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
+import { type FormEvent, useEffect, useState } from 'react'
 import './App.css'
+import { ApiError, login, logout, me, setUnauthorizedHandler, type User } from './api'
+import { Chat } from './components/Chat'
+import { Datasources } from './components/Datasources'
 
-function App() {
-  const [count, setCount] = useState(0)
+function LoginScreen({ onLoggedIn }: { onLoggedIn: (user: User) => void }) {
+  const [email, setEmail] = useState('alice@nimbus.dev')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault()
+    setError(null)
+    setBusy(true)
+    try {
+      const user = await login(email, password)
+      onLoggedIn(user)
+    } catch (err) {
+      setError(err instanceof ApiError ? String(err.detail) : 'login failed')
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
+    <div className="login-screen">
+      <form className="login-form" onSubmit={handleSubmit}>
+        <h1>Nimbus</h1>
+        <label>
+          Email
+          <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
+        </label>
+        <label>
+          Password
+          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required />
+        </label>
+        {error && <div className="error">{error}</div>}
+        <button type="submit" disabled={busy}>
+          {busy ? 'Signing in…' : 'Sign in'}
         </button>
-      </section>
+      </form>
+    </div>
+  )
+}
 
-      <div className="ticks"></div>
+function App() {
+  const [user, setUser] = useState<User | null>(null)
+  const [checkingSession, setCheckingSession] = useState(true)
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
+  useEffect(() => {
+    setUnauthorizedHandler(() => setUser(null))
+    me()
+      .then(setUser)
+      .catch(() => setUser(null))
+      .finally(() => setCheckingSession(false))
+    return () => setUnauthorizedHandler(null)
+  }, [])
+
+  async function handleLogout() {
+    await logout().catch(() => undefined)
+    setUser(null)
+  }
+
+  if (checkingSession) return null
+
+  if (!user) return <LoginScreen onLoggedIn={setUser} />
+
+  return (
+    <div className="app">
+      <header className="app-header">
+        <h1>Nimbus</h1>
+        <div className="session">
+          <span>{user.display_name}</span>
+          <button onClick={handleLogout}>Logout</button>
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+      </header>
+      <main className="app-body">
+        <Datasources />
+        <Chat />
+      </main>
+    </div>
   )
 }
 

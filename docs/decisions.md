@@ -585,3 +585,63 @@ protiv sinhronizacije koja je u toku kad se direktorijum obriše mid-sync.
 delete dokumena oslobađa sadržaj samo kad nema drugih živih referenci, nepostojeći/tuđ dokument
 vraća 404, uklonjeni dokument se ne pojavljuje u resync-u, kaskadno brisanje direktorijuma,
 race-guard worker ostaje između oba direktorijuma).
+
+---
+
+## v1.0-core / React UI — 2026-08-16
+
+### Kontekst
+
+Svi prethodni blokovi su završeni, ali `apps/web` je i dalje Vite template bez ikakve pravi logike
+— nema login forme, nema datasource liste, nema sinhronizacije ili chat-a. Ovom bloku je ostalo
+da sagradi jedini ekran koji će demonstrirati ceo tok: datasource → direktorijumi → dokumenti +
+sinhronizacija → chat sa citatima. Backend API je kompletan, frontend ga samo potrebni pozivati.
+
+### Odluke
+
+1. **Novi endpoint `GET /directories/{directory_id}/documents` dodat u ovom bloku**, jedini
+   backend rad. BUILDPLAN §7 ga eksplicitno stavlja ovde jer je to deo UI-ja koji ga koristi
+   (Remove dugme, prikaz `state` po fajlu). Filtrira samo `removed_at IS NULL`, ne puni
+   `is_live_clause()` — ovo je prikazna ruta, ne dedup mehanizam, i mora da pokazuje `failed`
+   i `deleted_at_source` redove kada v1.2 dolje (zahteva `state = 'indexed'` bi ih skrio).
+   Pokriveno sa 4 nova testa u `test_documents.py`.
+
+2. **`apps/web/src/api.ts` kao centralizovani fetch wrapper sa globalnim 401 handlingom.**
+   Svaki 401 odgovora (ne-inicijalni `/auth/me`) triggeruje `setUnauthorizedHandler()` callback,
+   što briše auth stanje i vraća korisnika na login — sesija je istekla bez eksplicitnog
+   logout-a. Sve rute se mapiraju na istu šemu kao Pydantic `*Out` modeli iz backend-a.
+
+3. **Tri nova komponente u `src/components/`:**
+   - `Datasources.tsx`: lista sa chipovima, "Connect" forma prepopulirana za LocalStack
+     (`endpoint_url=http://localstack:4566`, ostali dev defaults), auto-bira prvi kreirani
+   - `Directories.tsx`: browse (prefix sa liste), free-type prefix input, register, po-direktorijumu
+     Sync sa live polling (`queued`→`running`→terminal), expandable dokument lista sa Remove,
+     Delete direktorijuma
+   - `Chat.tsx`: lokalna poruka lista (bez HTTP `GET` istorije — v1.0 implicitni chat), Send,
+     numerisane `[1][2][3]` citacije rendovane ispod odgovora
+
+4. **`App.tsx` kao auth gate:** `me()` na mount, login forma ako nema user-a, inače header sa
+   display imenom + Logout, two-column flex layout za Datasources (levo, flex-3) + Chat (desno,
+   flex-2). Logout briše cookie, `me()` vraća `401`, globalni handler briše state.
+
+5. **Minimal CSS, nema framework-a:** plain flexbox, status badge-ovi, error inline pored akcije
+   koja je pukla, nema toast-a ili CSS framework-a. "Usable, not beautiful" po SPEC.
+
+6. **Jedna greška uhvaćena i ispravljena u Directories polling logici:** `syncSummary` je
+   prikazivao "nothing new to sync" i kad je `deduped > 0` a `indexed === 0`, što bi presuo
+   uspesan dedup kao nema-ništa-novog. Ispravka: odvaja provera — `indexed === 0 && deduped === 0`
+   tek tada "nothing new", inače "finished — indexed X, deduped Y, unchanged Z".
+
+### Verifikacija
+
+`docker compose down -v && docker compose up --build` (čist okruženje bez testnog zagađenja),
+pa `docker compose exec -T api pytest -q` → **45 passed** (svi testovi, uključujući 4 nova iz
+`test_documents.py`). Ručna provera kroz browser (§9 demo skript — full flow, ne samo
+komponente): login kao alice → connect → browse `alice/` → register `contracts/` → Sync (live
+progress, završa sa "indexed 3") → Sync ponovo ("unchanged 3") → register `duplicates/` → Sync
+("indexed 1" jer je dedup — dedup brojanja ispravljen) → expand dokumenta lista, vidi "msa.md",
+"nda.txt", "policy.pdf" svi "indexed" → chat pitanje → odgovore sa `[1][2][3]` citatima →
+logout → login kao bob → isto pitanje → "I don't have anything about that" (nula citata,
+potvrđena izolacija) → nazad kao alice → Remove "msa.md" → isto pitanje → odgovore sada bez
+"msa.md" citata (sadržaj oslobođen) → Sync ponovo → "msa.md" se ne vraća, soft delete preživi
+re-sync.
