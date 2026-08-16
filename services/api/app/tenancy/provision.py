@@ -2,9 +2,7 @@ import re
 
 from psycopg import Connection, sql
 
-# Bumped only when the tenant DDL below changes shape; provisioning always
-# writes the full schema for this version in one shot (BUILDPLAN.md §3 —
-# "DDL from one versioned function"), not incrementally per feature block.
+
 TENANT_SCHEMA_VERSION = 1
 
 

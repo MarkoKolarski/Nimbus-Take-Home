@@ -7,9 +7,6 @@ import psycopg
 from app.core.config import settings
 from app.tenancy.provision import TENANT_SCHEMA_VERSION, provision_tenant, schema_name_for
 
-# BUILDPLAN.md's Auth block commits to "a real email+password screen" for
-# these two seeded users; this is that fixed demo password (documented in
-# README once it's written in the submission phase).
 DEMO_PASSWORD = "nimbus-demo"
 
 DEMO_USERS = [
