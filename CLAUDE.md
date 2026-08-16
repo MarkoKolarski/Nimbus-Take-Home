@@ -30,6 +30,12 @@ passing output proves nothing.
   the code. Keep it short.
 - Function/docstring descriptions: short and precise, like a senior
   engineer would write them — no filler, no restating the signature.
+- Writing a JSONB column from raw SQLAlchemy `text()`: use
+  `CAST(:param AS jsonb)`, never `:param::jsonb`. The `::` right after a
+  bind name confuses text()'s param parser — it silently drops the bind
+  and psycopg fails on the literal `:` at runtime, not at query-build time.
+  Bit the sync worker once; will recur anywhere JSONB is written this way
+  (chat citations, summary compaction).
 
 # Workflow
 - Read SPEC.md and BUILDPLAN.md before starting any block.
