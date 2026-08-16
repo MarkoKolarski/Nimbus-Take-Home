@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.core.config import settings
 from app.domain.models import Datasource, Directory
@@ -38,15 +39,14 @@ def _create_datasource(client: TestClient, name: str) -> dict:
 
 
 def _delete_datasource(db_conn, email: str, datasource_id: str) -> None:
+    """directories.datasource_id has no ON DELETE CASCADE, tests must clear child directories first."""
     with tenant_session(_user_id(db_conn, email)) as db:
+        for directory in db.execute(
+            select(Directory).where(Directory.datasource_id == uuid.UUID(datasource_id))
+        ).scalars():
+            db.delete(directory)
+        db.flush()
         row = db.get(Datasource, uuid.UUID(datasource_id))
-        if row is not None:
-            db.delete(row)
-
-
-def _delete_directory(db_conn, email: str, directory_id: str) -> None:
-    with tenant_session(_user_id(db_conn, email)) as db:
-        row = db.get(Directory, uuid.UUID(directory_id))
         if row is not None:
             db.delete(row)
 

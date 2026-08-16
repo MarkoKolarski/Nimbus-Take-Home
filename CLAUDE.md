@@ -8,6 +8,11 @@ execution order and current status.
 - migrate: docker compose exec -T api alembic upgrade head
 - reset: docker compose down -v && docker compose up --build
 
+`api`/`worker` have no bind mount — code is baked into the image at build
+time. After any app code change, `docker compose up --build api worker`
+BEFORE running `test`, or pytest silently runs against the stale image and
+passing output proves nothing.
+
 # Non-negotiable invariants (breaking these is a data-safety bug)
 - get_current_user is the ONLY source of user identity. No route accepts
   user_id as a path, query or body parameter.
