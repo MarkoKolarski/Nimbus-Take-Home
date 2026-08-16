@@ -446,6 +446,77 @@ isti `content_hash` sa `msa.md` bez duplog upisa u `chunks`). Ručno potvrđeno 
 
 ---
 
+## v1.0-core / Chat + RAG — 2026-08-16
+
+### Kontekst
+
+`documents`/`chunks`/`contents` i njihova deduplikacija su već dovršeni (Ingest + dedup blok), kao i
+brisanje (Uklanjanje blok) — što znači da retrieval sada ima nad čime da radi. Ovom bloku je ostalo:
+tenant-scoped vector search sa `is_live_clause()` filtrom, retrieval sa similarity threshold-om,
+prompt assembly sa numerisanim izvorima, LLM poziv (OpenRouter ili EchoLLM fallback), i implicit
+jednu `Chat`/`ChatMessage` per tenant sa persistence-om kroz ORM. Sva to je v1.0 osnova; multi-chat
+sesije i conversation memory su v1.3+.
+
+### Odluke
+
+1. **`POST /chat/messages` kao implicitni single-chat endpoint po tenantu.** Kreiraj ili učitaj prvi
+   `Chat` red (po `created_at`), upiši `user` `ChatMessage` sa porukom. Nema `chat_id` u putanji
+   ovde — to dolazi u v1.3 ("postojeći v1.0 chat endpoint, sada skopiran na konkretan `chat_id`
+   umesto implicitnog jednog razgovora"). Ova je pretpostavka jedina koja čini v1.3 opis logičnim
+   (bez implicitnog chata u v1.0, v1.3 bi bio retrofit umesto wiring-a). Nema `GET` istorije
+   endpoint-a — to je v1.3.
+
+2. **`LLMClient` Protocol sa dva driveera: `OpenRouterLLM` i `EchoLLM`.** `OpenRouterLLM` kad
+   `settings.openrouter_api_key` nije prazna (`Bearer` auth, model = `openai/gpt-4o-mini`, jednostavni
+   `httpx.post` do `https://openrouter.ai/api/v1/chat/completions`). `EchoLLM` kao default kad nema
+   ključa — kompajlira mehanički odgovor iz pronađenih izvora bez mrežnog poziva. `get_llm_client()`
+   factory sa lazily-cached singletonom, isti obrazac kao `get_embedder()`.
+
+3. **`get_llm_client` kao FastAPI zavisnost, ne goliv poziv funkcije.** Ovo omogućava testu da
+   override-uje sa `app.dependency_overrides[get_llm_client] = lambda: EchoLLM()` i dobije
+   determinističan, besplatan odgovor bez obzira šta je u `.env` kontejnera. Obećanje iz BUILDPLAN
+   tabele rizika ("pytest nikad ne troši kredit") zahteva da se ovde ne oslanjamo na slučajnost
+   `OPENROUTER_API_KEY` vrednosti.
+
+4. **`VectorStore` Protocol sa `PgVectorStore` implementacijom.** Cosine distance pretraga sa `Chunk`
+   redova gdje je `content_hash IN (SELECT content_hash FROM documents WHERE is_live_clause())`.
+   Drugi, nezavisan prikaz `is_live_clause()` (prvi je sloj-3 dedup u Ingest bloku) — uklonjen
+   dokument nikad ne dolazi kao citat čak i ako `chunks` red fizički postoji. Nema user_id filtera
+   nigde — izolacija dolazi iz `search_path`, ista kao sveukupni sistemski dizajn.
+
+5. **Similarity threshold na 0.55, mereno, ne pretpostavljeno.** BUILDPLAN §6 je dao "npr. 0.5" kao
+   primer, ali merenja protiv `bge-small-en-v1.5` na fixture korpusu pokazuju: relevantni pogoci
+   0.66–0.78, nepovezan-ali-isti-domen ~0.47–0.50 (npr. Bob-ov onboarding guide naspram
+   Alice-inog pitanja o license fee-u), potpuno nepovezan ~0.30–0.37. Prag 0.55 razdvaja prva dva
+   slučaja bez odbacivanja stvarnih pogotka — izmeren je namerno.
+
+6. **Top-k = 5 zadržan, prag pre LLM-a u kodu, bez context = [] sposobnosti modelovanju.** Ako je
+   top-1 similarity ispod praga ili nema pogotaka, `retrieve()` vraća praznu listu — upis LLM-u je
+   sistema prompt koji onda govori "I don't have anything..." umesto da se model *oslanja* da
+   nema konteksta čini da to prosledi. BUILDPLAN §6 eksplicitno kaže ovo — numerički prag pre
+   poziva je jeftiniji i pouzdaniji.
+
+7. **Retrieval pobija `content_hash` → filenames sa jednom batch upitom.** Nekoliko chunk-ova može
+   podeliti isti `content_hash` (jedan fajl, više chunk-ova), a nekoliko dokumenata može imati isti
+   `content_hash` (isti sadržaj u više putanja — duplikati poslednji test sloja dedupa). Citat
+   pošteno navodi sve živih `documents` redove za taj `content_hash`.
+
+8. **Novi test fajl `test_chat.py`.** Dva testa sa `app.dependency_overrides` forced na `EchoLLM`:
+   (1) Alice syncs `alice/contracts/`, pita "What is the quarterly license fee for WidgetFlow?" —
+   odgovor treba da ima `"msa.md"` u `citations[*].filenames`; (2) Bob syncs `bob/contracts/`
+   (drugačiji sadržaj), ista pitanja — odgovor treba `citations == []` i "don't have" poruku,
+   dokazujući da retrieval nikad ne prelazi tenant granicu čak ni kad je pitanje semantički skrojeno
+   za drugu tenant (adversarial slučaj iz BUILDPLAN §3).
+
+### Verifikacija
+
+`docker compose up --build api worker` (novi `httpx` paket, bez fastembed/embedding promene), pa
+`docker compose exec -T api pytest -q` → **41 passed** (39 postoječih + 2 nova u `test_chat.py`).
+Ručno potvrđeno: `EchoLLM` fallback bez ijednog API ključa demonstrira full putanju (sync → retrieve
+→ cite), samo odgovor je mehanički umesto generisan.
+
+---
+
 ## v1.0-core / Uklanjanje — 2026-08-16
 
 ### Kontekst
