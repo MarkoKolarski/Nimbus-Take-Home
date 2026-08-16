@@ -287,3 +287,72 @@ postojećih + 6 novih u `test_directories.py`: registracija + listanje, duplo re
 `409`, registracija pod nepostojećim `datasource_id` → `404`, brisanje uklanja iz liste, Bob-ov
 register/list na Alice-in `datasource_id` → `404` za oba, Bob-ovo brisanje Alice-inog
 `directory_id` → `404` i red ostaje netaknut).
+
+---
+
+## v1.0-core / Sync state + worker — 2026-08-16
+
+### Kontekst
+
+`sync_jobs` i njegov partial unique index su već postojali (v0.1-skeleton) bez ijednog reda koda
+koji ih koristi. Ovom bloku je ostalo da to postane pravi mehanizam: enqueue/poll API i pravi
+worker loop, umesto `worker.py`-a koji je do sada samo spavao. `documents`/`contents`/`chunks` se u
+ovom bloku ne diraju uopšte — §8 tu granicu povlači eksplicitno (vidi odluku #1).
+
+### Odluke
+
+1. **Worker u ovom bloku samo LIST-uje i broji, ne dira `documents`.** §8 razdvaja ovaj blok
+   (`sync_jobs`, partial unique index, SKIP LOCKED petlja, polling endpoint) od "Ingest + dedup"
+   (streaming sha256, ekstrakcija, chunking, embedding, **sva tri sloja dedupa** — uključujući sloj
+   1, `(source_key, etag, size)`). Pošto sloj 1 eksplicitno pripada sledećem bloku, posao ovde staje
+   na `connector.list_objects(prefix)` i `stats = {"scanned": N}`. Namerno nema
+   `unchanged`/`indexed`/`deduped` ključeva sa lažnim nulama — to bi izgledalo kao "0 indeksirano"
+   umesto "još nije implementirano". Pretpostavka je zapisana i u BUILDPLAN.md.
+2. **`sync_jobs` ostaje sirov SQL, bez ORM modela** — isti obrazac kao `public.users`/`public.tenants`
+   u `security.py`/`registry.py`, `text()` sa eksplicitnim `public.sync_jobs` prefiksom. Tabela na
+   koju se pristupa isključivo po `id`/`directory_id`/`user_id` ne dobija ORM model samo da bi
+   postojao.
+3. **Claim korak radi na golom `SessionLocal()`, ne na `tenant_session`.** Worker ne zna kom
+   tenantu posao pripada dok ne pročita `user_id` iz preuzetog reda — `SELECT ... FOR UPDATE SKIP
+   LOCKED LIMIT 1` pa odmah `UPDATE ... state='running'`, ista transakcija, commit. Tek posle toga
+   `run_sync` otvara `tenant_session(user_id)` za `Directory`/`Datasource` i S3 poziv — tačno
+   podela koju `registry.py`-jev docstring (Tenant sloj blok) već najavljuje.
+4. **409 telo traži upit posle neuspelog INSERT-a, što traži eksplicitan rollback.** Povreda unique
+   indexa abortuje trenutnu Postgres transakciju; svaki naredni upit na istoj konekciji puca dok se
+   transakcija ne rollback-uje. Pošto taj rollback briše i `SET LOCAL search_path`, naredni upit za
+   postojeći posao mora biti eksplicitno `public.`-kvalifikovan (nije tenant tabela, pa to i nije
+   problem). Isti obrazac 409-a kao Direktorijumi blok (`IntegrityError` → čitljiv status), ovde uz
+   dodatni rollback jer treba i telo odgovora, ne samo status kod.
+5. **Greška na nivou posla ide u `stats.error`, ne u novu kolonu.** `sync_jobs` ima `error_count`
+   (int, rezervisan za v1.2-ov brojač po fajlu), ali nema tekstualnu `error` kolonu. Otkaz celog
+   posla (direktorijum nestao pre nego što ga je worker stigao, loš connector config) je druga vrsta
+   otkaza od po-fajl otkaza; JSONB polje koje već postoji je jeftinije od migracije za kolonu koju bi
+   v1.2 verovatno svejedno hteo drugačije oblikovanu.
+6. **`GET` pre ijednog sync-a → `404`.** SPEC/§5 opisuje četiri stanja (nothing new / in progress /
+   running / finished), ne i peto za "nikad pokrenuto". Tretirano isto kao svaki drugi nepostojeći
+   resurs u ovom kodu (404, ne prazan objekat) — ista 404-ne-403 linija kao svuda drugde.
+7. **Jedan namerno pokrenut `failed` put, preko direktno ubačenog reda.** Realan `failed` scenario
+   (direktorijum obrisan između enqueue-a i preuzimanja) bi tražio trkanje sa pravim workerom da bi
+   test bio determinstičan. Test umesto toga ubacuje `sync_jobs` red direktno (`db_conn`) sa
+   `directory_id`-jem koji ne postoji ni u jednoj tenant šemi, i poluje `public.sync_jobs.state`
+   direktno — jedini način da se `run_sync`-ova except grana pouzdano pokrije bez flakiness-a.
+
+### Greške pronađene i ispravljene tokom izrade
+
+- **`:stats::jsonb` u `text()` SQL-u je tiho progutao bind parametar.** SQLAlchemy-jev parser za
+  `text()` bind parametre se zbunio na `::` odmah posle imena parametra — `:stats` nikad nije
+  prepoznat kao bind, ostao je bukvalno u SQL-u, i psycopg je pukao na "syntax error at or near
+  ':'" tek unutar workera (ne u samom API zahtevu). Worker je pao na prvom poslu i ostao mrtav do
+  sledećeg `docker compose up`, ostavljajući poslove zaglavljene u `queued`/`running` zauvek — tačno
+  scenario koji je BUILDPLAN.md već imenovao kao poznato v1.0 ograničenje (nema reaper-a), samo iz
+  pogrešnog razloga (bug, ne stvarna smrt workera). Ispravka: `CAST(:stats AS jsonb)` umesto `::`
+  na oba mesta gde se `stats` upisuje.
+
+### Verifikacija
+
+`docker compose up -d --build` (rebuild `api` i `worker`, oba bez bind mounta), pa
+`docker compose exec -T api pytest -q` → **30 passed** (24 postojećih + 6 novih u
+`test_sync_state.py`: enqueue → worker stvarno završi posao sa `stats.scanned == 3` nad pravim
+`alice/contracts/` fixture-ima, drugi klik zaredom → `409` sa postojećim poslom u telu, Bob-ov
+POST/GET na Alice-in `directory_id` → `404` oba, POST na nepostojeći `directory_id` → `404`, GET
+pre ijednog sync-a → `404`, worker označava posao `failed` kad direktorijum ne postoji).

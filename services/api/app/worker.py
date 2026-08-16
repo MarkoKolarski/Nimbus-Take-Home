@@ -1,11 +1,17 @@
 import time
 
+from app.sync.runner import POLL_INTERVAL_SECONDS, claim_next_queued_job, run_sync
+
 
 def main() -> None:
-    # Real SKIP LOCKED polling loop lands in the "Sync state + worker" block.
-    print("worker started, nothing to poll yet")
+    print("worker started")
     while True:
-        time.sleep(5)
+        claimed = claim_next_queued_job()
+        if claimed is None:
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+        job_id, user_id, directory_id = claimed
+        run_sync(job_id, user_id, directory_id)
 
 
 if __name__ == "__main__":
